@@ -36,6 +36,7 @@ public class MdocGattServer: @unchecked Sendable, ObservableObject {
 	public var deviceRequest: DeviceRequest?
 	public var sessionEncryption: SessionEncryption?
 	public var docs: [String: IssuerSigned]!
+	public var w3cDocs: [String: String]!
 	public var docDisplayNames: [String: [String: [String: String]]?]!
 	public var iaca: [SecCertificate]!
 	public var devicePrivateKeys: [String: CoseKeyPrivate]!
@@ -55,7 +56,8 @@ public class MdocGattServer: @unchecked Sendable, ObservableObject {
 	
 	public init(parameters: InitializeTransferData) throws {
 		let objs = parameters.toInitializeTransferInfo()
-		self.docs = objs.documentObjects.mapValues { IssuerSigned(data: $0.bytes) }.compactMapValues { $0 }
+		self.docs = objs.documentObjects.filter { k,v in objs.dataFormats[k] == .cbor } .mapValues { IssuerSigned(data: $0.bytes) }.compactMapValues { $0 }
+		self.w3cDocs = objs.documentObjects.filter { k,v in objs.dataFormats[k] == .w3cjwt }.compactMapValues { String(data: $0, encoding: .utf8) }
 		docDisplayNames = objs.docDisplayNames
 		self.devicePrivateKeys = objs.privateKeyObjects
 		self.iaca = objs.iaca
@@ -219,7 +221,7 @@ public class MdocGattServer: @unchecked Sendable, ObservableObject {
 		delegate?.didChangeStatus(newValue)
 		if newValue == .requestReceived {
 			peripheralManager.stopAdvertising()
-			let decodedRes = await MdocHelpers.decodeRequestAndInformUser(deviceEngagement: deviceEngagement, docs: docs, docDisplayNames: docDisplayNames, iaca: iaca, requestData: readBuffer, devicePrivateKeys: devicePrivateKeys, dauthMethod: dauthMethod, unlockData: unlockData, readerKeyRawData: nil, handOver: BleTransferMode.QRHandover)
+			let decodedRes = await MdocHelpers.decodeRequestAndInformUser(deviceEngagement: deviceEngagement, docs: docs, docDisplayNames: docDisplayNames, iaca: iaca, requestData: readBuffer, devicePrivateKeys: devicePrivateKeys, dauthMethod: dauthMethod, unlockData: unlockData, readerKeyRawData: nil, handOver: BleTransferMode.QRHandover, w3cDocs: w3cDocs)
 			switch decodedRes {
 			case .success(let decoded):
 				self.deviceRequest = decoded.deviceRequest
@@ -263,18 +265,37 @@ public class MdocGattServer: @unchecked Sendable, ObservableObject {
 		if let items {
 			do {
 				let docTypeReq = deviceRequest?.docRequests.first?.itemsRequest.docType ?? ""
-				guard let (drToSend, _, _) = try await MdocHelpers.getDeviceResponseToSend(deviceRequest: deviceRequest!, issuerSigned: docs, docDisplayNames: docDisplayNames, selectedItems: items, sessionEncryption: sessionEncryption, eReaderKey: sessionEncryption!.sessionKeys.publicKey, devicePrivateKeys: devicePrivateKeys, dauthMethod: dauthMethod, unlockData: unlockData) else {
-					errorToSend = MdocHelpers.getErrorNoDocuments(docTypeReq); return
-				}
-				guard let dts = drToSend.documents, !dts.isEmpty else { errorToSend = MdocHelpers.getErrorNoDocuments(docTypeReq); return  }
-				let dataRes = await MdocHelpers.getSessionDataToSend(sessionEncryption: sessionEncryption, status: .requestReceived, docToSend: drToSend)
-				switch dataRes {
-				case .success(let bytes):
-					bytesToSend = bytes
-				case .failure(let err):
-					errorToSend = err
-					return
-				}
+				//if !docs.isEmpty {
+					guard var (drToSend, _, _) = try await MdocHelpers.getDeviceResponseToSend(deviceRequest: deviceRequest!, issuerSigned: docs, docDisplayNames: docDisplayNames, selectedItems: items, sessionEncryption: sessionEncryption, eReaderKey: sessionEncryption!.sessionKeys.publicKey, devicePrivateKeys: devicePrivateKeys, dauthMethod: dauthMethod, unlockData: unlockData) else {
+						errorToSend = MdocHelpers.getErrorNoDocuments(docTypeReq); return
+					}
+					
+					drToSend.w3cDocuments = try await MdocHelpers.getW3CResponseToSend(deviceRequest: deviceRequest!, w3cDocs: w3cDocs, docDisplayNames: docDisplayNames, selectedItems: items, sessionEncryption: sessionEncryption, eReaderKey: sessionEncryption!.sessionKeys.publicKey, devicePrivateKeys: devicePrivateKeys, dauthMethod: dauthMethod, unlockData: unlockData)
+					
+					//guard let dts = drToSend.documents, !dts.isEmpty else { errorToSend = MdocHelpers.getErrorNoDocuments(docTypeReq); return  }
+					let dataRes = await MdocHelpers.getSessionDataToSend(sessionEncryption: sessionEncryption, status: .requestReceived, docToSend: drToSend)
+					switch dataRes {
+					case .success(let bytes):
+						bytesToSend = bytes
+					case .failure(let err):
+						errorToSend = err
+						return
+					}
+//				} else if !w3cDocs.isEmpty {
+//					guard let jwtVCToSend = try await MdocHelpers.getW3CResponseToSend(deviceRequest: deviceRequest!, w3cDocs: w3cDocs, docDisplayNames: docDisplayNames, selectedItems: items, sessionEncryption: sessionEncryption, eReaderKey: sessionEncryption!.sessionKeys.publicKey, devicePrivateKeys: devicePrivateKeys, dauthMethod: dauthMethod, unlockData: unlockData) else {
+//						errorToSend = MdocHelpers.getErrorNoDocuments(docTypeReq); return
+//					}
+//					
+//					//guard let dts = jwtVCToSend, !dts.isEmpty else { errorToSend = MdocHelpers.getErrorNoDocuments(docTypeReq); return  }
+//					//let dataRes = await MdocHelpers.getSessionDataToSend(sessionEncryption: sessionEncryption, status: .requestReceived, docToSend: jwtVCToSend)
+////					switch dataRes {
+////					case .success(let bytes):
+////						bytesToSend = bytes
+////					case .failure(let err):
+////						errorToSend = err
+////						return
+////					}
+//				}
 			}
 			catch { errorToSend = error }
 			if let errorToSend { logger.error("Error sending data: \(errorToSend)")}
