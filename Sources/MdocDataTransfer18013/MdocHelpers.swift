@@ -158,7 +158,7 @@ public class MdocHelpers {
 			if haveSelectedItems == false {
 				docReq = deviceRequest?.docRequests.findDoc(name: reqDocIdOrDocType)
 				guard let pair = issuerSigned.first(where: { $1.issuerAuth.mso.docType == reqDocIdOrDocType}) else {
-					if docReq.itemsRequest.requestInfo?["format"] == "mdoc" {
+					if let format = docReq?.itemsRequest.requestInfo?["format"], format == "mdoc" {
 						docErrors.append([reqDocIdOrDocType: UInt64(0)])
 						errorReqItemsDocDict[reqDocIdOrDocType] = [:]
 					} else {
