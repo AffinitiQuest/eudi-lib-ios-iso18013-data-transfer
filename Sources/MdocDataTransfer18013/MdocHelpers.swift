@@ -94,7 +94,7 @@ public class MdocHelpers {
 			
 			var userRequestInfo = UserRequestInfo(docDataFormats: docs.mapValues { _ in .cbor }, validItemsRequested: validRequestItems, errorItemsRequested: errorRequestItems)
 			if let w3cDocs {
-				userRequestInfo = UserRequestInfo(docDataFormats: w3cDocs.mapValues { _ in .w3cjwt }, validItemsRequested: [:], errorItemsRequested: [:])
+				userRequestInfo = UserRequestInfo(docDataFormats: w3cDocs.mapValues { _ in .w3cjwt }, validItemsRequested: validRequestItems, errorItemsRequested: [:])
 				bInvalidReq = false
 			}
 			
