@@ -270,7 +270,7 @@ public class MdocGattServer: @unchecked Sendable, ObservableObject {
 						errorToSend = MdocHelpers.getErrorNoDocuments(docTypeReq); return
 					}
 					
-					drToSend.w3cDocuments = try await MdocHelpers.getW3CResponseToSend(deviceRequest: deviceRequest!, w3cDocs: w3cDocs, docDisplayNames: docDisplayNames, selectedItems: items, sessionEncryption: sessionEncryption, eReaderKey: sessionEncryption!.sessionKeys.publicKey, devicePrivateKeys: devicePrivateKeys, dauthMethod: dauthMethod, unlockData: unlockData)
+					drToSend.w3cDocuments = try await MdocHelpers.getW3CResponseToSend(deviceRequest: deviceRequest!, w3cDocs: w3cDocs, docDisplayNames: docDisplayNames, selectedItems: items, sessionEncryption: sessionEncryption, eReaderKey: sessionEncryption!.sessionKeys.publicKey, devicePrivateKeys: devicePrivateKeys, dauthMethod: dauthMethod, unlockData: unlockData, docType: docTypeReq)
 					
 					//guard let dts = drToSend.documents, !dts.isEmpty else { errorToSend = MdocHelpers.getErrorNoDocuments(docTypeReq); return  }
 					let dataRes = await MdocHelpers.getSessionDataToSend(sessionEncryption: sessionEncryption, status: .requestReceived, docToSend: drToSend)

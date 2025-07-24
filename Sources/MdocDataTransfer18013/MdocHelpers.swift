@@ -110,7 +110,7 @@ public class MdocHelpers {
 		} catch { return .failure(error) }
 	}
 	
-	public static func getW3CResponseToSend(deviceRequest: DeviceRequest?, w3cDocs: [String: String], docDisplayNames: [String: [String: [String: String]]?], selectedItems: RequestItems? = nil, sessionEncryption: SessionEncryption? = nil, eReaderKey: CoseKey? = nil, devicePrivateKeys: [String: CoseKeyPrivate], sessionTranscript: SessionTranscript? = nil, dauthMethod: DeviceAuthMethod, unlockData: [String: Data]) async throws -> [W3CDocument]? {
+	public static func getW3CResponseToSend(deviceRequest: DeviceRequest?, w3cDocs: [String: String], docDisplayNames: [String: [String: [String: String]]?], selectedItems: RequestItems? = nil, sessionEncryption: SessionEncryption? = nil, eReaderKey: CoseKey? = nil, devicePrivateKeys: [String: CoseKeyPrivate], sessionTranscript: SessionTranscript? = nil, dauthMethod: DeviceAuthMethod, unlockData: [String: Data], docType: String) async throws -> [W3CDocument]? {
 		var docFiltered = [W3CDocument]()
 		let haveSelectedItems = selectedItems != nil
 		let reqDocIdsOrDocTypes = if haveSelectedItems { Array(selectedItems!.keys) } else { deviceRequest!.docRequests.map(\.itemsRequest.docType) }
@@ -122,12 +122,12 @@ public class MdocHelpers {
 			if let eReaderKey, let sessionTranscript, let devicePrivateKey {
 				let authKeys = CoseKeyExchange(publicKey: eReaderKey, privateKey: devicePrivateKey)
 				let mdocAuth = MdocAuthentication(transcript: sessionTranscript, authKeys: authKeys)
-				guard let devAuth = try await mdocAuth.getDeviceAuthForTransfer(docType: "BigBeaverBread", deviceNameSpacesRawData: [0xA0], dauthMethod: dauthMethod, unlockData: unlockData[reqDocIdOrDocType]) else {
+				guard let devAuth = try await mdocAuth.getDeviceAuthForTransfer(docType: docType, deviceNameSpacesRawData: [0xA0], dauthMethod: dauthMethod, unlockData: unlockData[reqDocIdOrDocType]) else {
 					logger.error("Cannot create device auth"); return nil
 				}
 				devSignedToAdd = devAuth
 			}
-			let docToAdd = W3CDocument(docType: "BigBeaverBread", jwt: w3cDocs[reqDocIdOrDocType]!, deviceAuth: devSignedToAdd!)
+			let docToAdd = W3CDocument(docType: docType, jwt: w3cDocs[reqDocIdOrDocType]!, deviceAuth: devSignedToAdd!)
 			docFiltered.append(docToAdd)
 		}
 		
