@@ -117,8 +117,8 @@ public class MdocHelpers {
 		for reqDocIdOrDocType in reqDocIdsOrDocTypes {
 			guard let jwt = w3cDocs[reqDocIdOrDocType] else {
 				// Need to update how this works. Can't be attempting to map MDOC keys to JWT objects.
-				println("No JWT, not the correct format for this ID.")
-				return
+				print("No JWT, not the correct format for this ID.")
+				return docFiltered
 			}
 			let devicePrivateKey = devicePrivateKeys[reqDocIdOrDocType]
 			
