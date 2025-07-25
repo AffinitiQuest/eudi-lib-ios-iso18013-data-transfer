@@ -115,6 +115,11 @@ public class MdocHelpers {
 		let haveSelectedItems = selectedItems != nil
 		let reqDocIdsOrDocTypes = if haveSelectedItems { Array(selectedItems!.keys) } else { deviceRequest!.docRequests.map(\.itemsRequest.docType) }
 		for reqDocIdOrDocType in reqDocIdsOrDocTypes {
+			guard let jwt = w3cDocs[reqDocIdOrDocType] else {
+				// Need to update how this works. Can't be attempting to map MDOC keys to JWT objects.
+				println("No JWT, not the correct format for this ID.")
+				return
+			}
 			let devicePrivateKey = devicePrivateKeys[reqDocIdOrDocType]
 			
 			var devSignedToAdd: DeviceAuth? = nil
