@@ -361,12 +361,23 @@ public class MdocHelpers {
 
 	/// Get the common name (CN) from the certificate distringuished name (DN)
 	public static func getCN(from dn: String) -> String  {
-			let regex = try! NSRegularExpression(pattern: "CN=([^,]+)")
-			if let match = regex.firstMatch(in: dn, range: NSRange(location: 0, length: dn.count)) {
-				if let r = Range(match.range(at: 1), in: dn) {
-					return String(dn[r])
-				}
+		let regex = try! NSRegularExpression(pattern: "CN=([^,]+)")
+		if let match = regex.firstMatch(in: dn, range: NSRange(location: 0, length: dn.count)) {
+			if let r = Range(match.range(at: 1), in: dn) {
+				return String(dn[r])
 			}
-			return dn
 		}
+		return dn
+	}
+
+	/// Get the common name (O) from the certificate distringuished name (DN)
+	public static func getO(from dn: String) -> String  {
+		let regex = try! NSRegularExpression(pattern: "O=([^,]+)")
+		if let match = regex.firstMatch(in: dn, range: NSRange(location: 0, length: dn.count)) {
+			if let r = Range(match.range(at: 1), in: dn) {
+				return String(dn[r])
+			}
+		}
+		return dn
+	}
 }
