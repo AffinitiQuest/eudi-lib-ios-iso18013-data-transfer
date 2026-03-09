@@ -36,6 +36,7 @@ public class MdocGattServer: @unchecked Sendable, ObservableObject {
 	public var deviceRequest: DeviceRequest?
 	public var sessionEncryption: SessionEncryption?
 	public var docs: [String: IssuerSigned]!
+	public var w3cDocs: [String: String]!
 	public var docMetadata: [String: Data?]!
 	public var iaca: [SecCertificate]!
 	public var privateKeyObjects: [String: CoseKeyPrivate]!
@@ -69,7 +70,8 @@ public class MdocGattServer: @unchecked Sendable, ObservableObject {
 
 	public init(parameters: InitializeTransferData) throws {
 		let objs = parameters.toInitializeTransferInfo()
-		self.docs = try objs.documentObjects.mapValues { try IssuerSigned(data: $0.bytes) }
+		self.docs = try objs.documentObjects.filter { k,v in objs.dataFormats[k] == .cbor } .mapValues { try? IssuerSigned(data: $0.bytes) }.compactMapValues { $0 }
+		self.w3cDocs = objs.documentObjects.filter { k,v in objs.dataFormats[k] == .w3cJwt }.compactMapValues { String(data: $0, encoding: .utf8) }
 		docMetadata = parameters.docMetadata
 		self.privateKeyObjects = objs.privateKeyObjects
 		self.iaca = objs.iaca
@@ -282,7 +284,7 @@ public class MdocGattServer: @unchecked Sendable, ObservableObject {
 		delegate?.didChangeStatus(newValue)
 		if newValue == .requestReceived {
 			peripheralManager.stopAdvertising()
-			let decodedRes = await MdocHelpers.decodeRequestAndInformUser(deviceEngagement: deviceEngagement, docs: docs, docMetadata: docMetadata.compactMapValues { $0 }, iaca: iaca, requestData: readBuffer, privateKeyObjects: privateKeyObjects, dauthMethod: dauthMethod, unlockData: unlockData, readerKeyRawData: nil, handOver: BleTransferMode.QRHandover)
+			let decodedRes = await MdocHelpers.decodeRequestAndInformUser(deviceEngagement: deviceEngagement, docs: docs, docMetadata: docMetadata.compactMapValues { $0 }, iaca: iaca, requestData: readBuffer, privateKeyObjects: privateKeyObjects, dauthMethod: dauthMethod, unlockData: unlockData, readerKeyRawData: nil, handOver: BleTransferMode.QRHandover, w3cDocs: w3cDocs)
 			switch decodedRes {
 			case .success(let decoded):
 				self.deviceRequest = decoded.deviceRequest
@@ -330,14 +332,17 @@ public class MdocGattServer: @unchecked Sendable, ObservableObject {
 		if let items {
 			do {
 				let docTypeReq = deviceRequest?.docRequests.first?.itemsRequest.docType ?? ""
-				guard let (drToSend, _, _, resMetadata) = try await MdocHelpers.getDeviceResponseToSend(deviceRequest: deviceRequest!, issuerSigned: docs, docMetadata: docMetadata.compactMapValues { $0 }, selectedItems: items, sessionEncryption: sessionEncryption, eReaderKey: sessionEncryption!.sessionKeys.publicKey, privateKeyObjects: privateKeyObjects, dauthMethod: dauthMethod, unlockData: unlockData) else {
+				guard var (drToSend, _, _, resMetadata) = try await MdocHelpers.getDeviceResponseToSend(deviceRequest: deviceRequest!, issuerSigned: docs, docMetadata: docMetadata.compactMapValues { $0 }, selectedItems: items, sessionEncryption: sessionEncryption, eReaderKey: sessionEncryption!.sessionKeys.publicKey, privateKeyObjects: privateKeyObjects, dauthMethod: dauthMethod, unlockData: unlockData) else {
 					errorToSend = MdocHelpers.getErrorNoDocuments(docTypeReq)
 					return
 				}
-				guard let dts = drToSend.documents, !dts.isEmpty else {
-					errorToSend = MdocHelpers.getErrorNoDocuments(docTypeReq)
-					return
-				}
+				
+				drToSend.w3cDocuments = try await MdocHelpers.getW3CResponseToSend(deviceRequest: deviceRequest!, w3cDocs: w3cDocs, docMetadata: docMetadata.compactMapValues { $0 }, selectedItems: items, sessionEncryption: sessionEncryption, eReaderKey: sessionEncryption!.sessionKeys.publicKey, privateKeyObjects: privateKeyObjects, dauthMethod: dauthMethod, unlockData: unlockData, docType: docTypeReq)
+				
+//				guard let dts = drToSend.documents, !dts.isEmpty else {
+//					errorToSend = MdocHelpers.getErrorNoDocuments(docTypeReq)
+//					return
+//				}
 				let dataRes = await MdocHelpers.getSessionDataToSend(sessionEncryption: sessionEncryption, status: .requestReceived, docToSend: drToSend)
 				switch dataRes {
 				case .success(let bytes):

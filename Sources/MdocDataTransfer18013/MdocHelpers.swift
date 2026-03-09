@@ -52,7 +52,7 @@ public class MdocHelpers {
 	public static func getSessionDataToSend(sessionEncryption: SessionEncryption?, status: TransferStatus, docToSend: DeviceResponse) async -> Result<(Data, Data), Error> {
 		do {
 			guard var sessionEncryption else { logger.error("Session Encryption not initialized"); return .failure(Self.makeError(code: .sessionEncryptionNotInitialized)) }
-			if docToSend.documents == nil, status != .error { logger.error("Could not create documents to send") }
+			if docToSend.documents == nil && docToSend.w3cDocuments == nil, status != .error { logger.error("Could not create documents to send") }
 			let cborToSend = docToSend.toCBOR(options: CBOROptions())
 			let clearBytesToSend = cborToSend.encode()
 			let cipherData = try await sessionEncryption.encrypt(clearBytesToSend)
@@ -72,7 +72,7 @@ public class MdocHelpers {
 	///   - handOver: handOver structure
 	/// - Returns: A ``DeviceRequest`` object
 
-	public static func decodeRequestAndInformUser(deviceEngagement: DeviceEngagement?, docs: [String: IssuerSigned], docMetadata: [String: Data], iaca: [SecCertificate], requestData: Data, privateKeyObjects: [String: CoseKeyPrivate], dauthMethod: DeviceAuthMethod, unlockData: [String: Data], readerKeyRawData: [UInt8]?, handOver: CBOR) async -> Result<(sessionEncryption: SessionEncryption, deviceRequest: DeviceRequest, userRequestInfo: UserRequestInfo, isValidRequest: Bool), Error> {
+	public static func decodeRequestAndInformUser(deviceEngagement: DeviceEngagement?, docs: [String: IssuerSigned], docMetadata: [String: Data], iaca: [SecCertificate], requestData: Data, privateKeyObjects: [String: CoseKeyPrivate], dauthMethod: DeviceAuthMethod, unlockData: [String: Data], readerKeyRawData: [UInt8]?, handOver: CBOR, w3cDocs: [String: String]? = nil) async -> Result<(sessionEncryption: SessionEncryption, deviceRequest: DeviceRequest, userRequestInfo: UserRequestInfo, isValidRequest: Bool), Error> {
 		do {
 			guard let seCbor = try CBOR.decode([UInt8](requestData)) else { logger.error("Request Data is not Cbor"); return .failure(Self.makeError(code: .requestDecodeError)) }
 			var se = try SessionEstablishment(cbor: seCbor)
@@ -86,12 +86,23 @@ public class MdocHelpers {
 			let requestData = try await sessionEncryption.decrypt(requestCipherData)
 			let deviceRequest = try DeviceRequest(data: requestData)
 			guard let (drTest, validRequestItems, _, _) = try await Self.getDeviceResponseToSend(deviceRequest: deviceRequest, issuerSigned: docs, docMetadata: docMetadata, selectedItems: nil, sessionEncryption: sessionEncryption, eReaderKey: sessionEncryption.sessionKeys.publicKey, privateKeyObjects: privateKeyObjects, dauthMethod: dauthMethod, unlockData: unlockData) else { logger.error("Valid request items nil"); return .failure(Self.makeError(code: .requestDecodeError)) }
-			let bInvalidReq = (drTest.documents == nil)
+			var bInvalidReq = (drTest.documents == nil)
 			var userRequestInfo = UserRequestInfo(docDataFormats: docs.mapValues { _ in .cbor }, itemsRequested: validRequestItems, deviceRequestBytes: Data(requestData))
+			if let w3cDocs {
+				userRequestInfo = UserRequestInfo(docDataFormats: w3cDocs.mapValues { _ in .w3cJwt }, itemsRequested: validRequestItems, deviceRequestBytes: Data(requestData))
+				bInvalidReq = false
+			}
+			
 			if let docR = deviceRequest.docRequests.first {
 				let mdocAuth = MdocReaderAuthentication(transcript: sessionEncryption.sessionTranscript)
-				if let readerAuthRawCBOR = docR.readerAuthRawCBOR, case let certData = docR.readerCertificates, certData.count > 0, let x509 = try? X509.Certificate(derEncoded: [UInt8](certData.first!)), let (b,reasonFailure) = try? mdocAuth.validateReaderAuth(readerAuthCBOR: readerAuthRawCBOR, readerAuthX5c: certData, itemsRequestRawData: docR.itemsRequestRawData!, rootCerts: iaca) {
+				if let readerAuthRawCBOR = docR.readerAuthRawCBOR, case let certData = docR.readerCertificates, certData.count > 0 {
+					print("DEBUG: reader cert chain count=\(certData.count), iaca count=\((iaca ?? []).count)")
+				for (i, cd) in certData.enumerated() { print("DEBUG chain[\(i)]: \(cd.base64EncodedString())") }
+				for (i, rc) in (iaca ?? []).enumerated() { print("DEBUG iaca[\(i)]: \((SecCertificateCopyData(rc) as Data).base64EncodedString())") }
+			}
+			if let readerAuthRawCBOR = docR.readerAuthRawCBOR, case let certData = docR.readerCertificates, certData.count > 0, let x509 = try? X509.Certificate(derEncoded: [UInt8](certData.first!)), let (b,reasonFailure) = try? mdocAuth.validateReaderAuth(readerAuthCBOR: readerAuthRawCBOR, readerAuthX5c: certData, itemsRequestRawData: docR.itemsRequestRawData!, rootCerts: iaca) {
 					userRequestInfo.readerCertificateIssuer = MdocHelpers.getCN(from: x509.subject.description)
+					userRequestInfo.readerLegalName = MdocHelpers.getO(from: x509.subject.description)
 					userRequestInfo.readerAuthValidated = b
 					if let reasonFailure { userRequestInfo.readerCertificateValidationMessage = reasonFailure }
 					if let rab = docR.readerAuthRawCBOR { userRequestInfo.readerAuthBytes = Data(rab.encode()) }
@@ -126,8 +137,12 @@ public class MdocHelpers {
 			if haveSelectedItems == false {
 				docReq = deviceRequest?.docRequests.findDoc(name: reqDocIdOrDocType)
 				guard let pair = issuerSigned.first(where: { $1.issuerAuth.mso.docType == reqDocIdOrDocType}) else {
-					docErrors.append([reqDocIdOrDocType: UInt64(0)])
-					errorReqItemsDocDict[reqDocIdOrDocType] = [:]
+					if let format = docReq?.itemsRequest.requestInfo?["format"], format == "mdoc" {
+						docErrors.append([reqDocIdOrDocType: UInt64(0)])
+						errorReqItemsDocDict[reqDocIdOrDocType] = [:]
+					} else {
+						validReqItemsDocDict[reqDocIdOrDocType] = ["all": []];
+					}
 					continue
 				}
 				docId = pair.key
@@ -197,6 +212,35 @@ public class MdocHelpers {
 		let deviceResponseToSend = DeviceResponse(version: DeviceResponse.defaultVersion, documents: documentsToAdd, documentErrors: documentErrors, status: 0)
 		return (deviceResponseToSend, validReqItemsDocDict, errorReqItemsDocDict, resMetadata)
 	}
+	
+	public static func getW3CResponseToSend(deviceRequest: DeviceRequest?, w3cDocs: [String: String], docMetadata: [String: Data], selectedItems: RequestItems? = nil, sessionEncryption: SessionEncryption? = nil, eReaderKey: CoseKey? = nil, privateKeyObjects: [String: CoseKeyPrivate], sessionTranscript: SessionTranscript? = nil, dauthMethod: DeviceAuthMethod, unlockData: [String: Data], docType: String) async throws -> [W3CDocument]? {
+			var docFiltered = [W3CDocument]()
+			let haveSelectedItems = selectedItems != nil
+			let reqDocIdsOrDocTypes = if haveSelectedItems { Array(selectedItems!.keys) } else { deviceRequest!.docRequests.map(\.itemsRequest.docType) }
+			for reqDocIdOrDocType in reqDocIdsOrDocTypes {
+				guard let jwt = w3cDocs[reqDocIdOrDocType] else {
+					// Need to update how this works. Can't be attempting to map MDOC keys to JWT objects.
+					print("No JWT, not the correct format for this ID.")
+					return nil
+				}
+				let devicePrivateKey = privateKeyObjects[reqDocIdOrDocType]
+
+				var devSignedToAdd: DeviceAuth? = nil
+				let sessionTranscript = sessionEncryption?.sessionTranscript ?? sessionTranscript
+				if let eReaderKey, let sessionTranscript, let devicePrivateKey {
+					let authKeys = CoseKeyExchange(publicKey: eReaderKey, privateKey: devicePrivateKey)
+					let mdocAuth = MdocAuthentication(sessionTranscript: sessionTranscript, authKeys: authKeys)
+					guard let devAuth = try await mdocAuth.getDeviceAuthForTransfer(docType: docType, deviceNameSpacesRawData: [0xA0], dauthMethod: dauthMethod, unlockData: unlockData[reqDocIdOrDocType]) else {
+						logger.error("Cannot create device auth"); return nil
+					}
+					devSignedToAdd = devAuth
+				}
+				let docToAdd = W3CDocument(docType: docType, jwt: w3cDocs[reqDocIdOrDocType]!, deviceAuth: devSignedToAdd!)
+				docFiltered.append(docToAdd)
+			}
+
+			return docFiltered
+		}
 
 	/// Returns the number of blocks that dataLength bytes of data can be split into, given a maximum block size of maxBlockSize bytes.
 	/// - Parameters:
@@ -330,4 +374,16 @@ public class MdocHelpers {
 			}
 			return dn
 		}
+	
+	/// Get the common name (O) from the certificate distringuished name (DN)
+		public static func getO(from dn: String) -> String  {
+			let regex = try! NSRegularExpression(pattern: "O=([^,]+)")
+			if let match = regex.firstMatch(in: dn, range: NSRange(location: 0, length: dn.count)) {
+				if let r = Range(match.range(at: 1), in: dn) {
+					return String(dn[r])
+				}
+			}
+			return dn
+		}
+	
 }
