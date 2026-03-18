@@ -52,9 +52,10 @@ public class MdocHelpers {
 	public static func getSessionDataToSend(sessionEncryption: SessionEncryption?, status: TransferStatus, docToSend: DeviceResponse) async -> Result<(Data, Data), Error> {
 		do {
 			guard var sessionEncryption else { logger.error("Session Encryption not initialized"); return .failure(Self.makeError(code: .sessionEncryptionNotInitialized)) }
-			if docToSend.documents == nil && docToSend.w3cDocuments == nil, status != .error { logger.error("Could not create documents to send") }
+			if docToSend.documents == nil, status != .error { logger.error("Could not create documents to send") }
 			let cborToSend = docToSend.toCBOR(options: CBOROptions())
 			let clearBytesToSend = cborToSend.encode()
+			print("CBOR hex: \(clearBytesToSend.map { String(format: "%02x", $0) }.joined())")
 			let cipherData = try await sessionEncryption.encrypt(clearBytesToSend)
 			let sd = SessionData(cipher_data: status == .error ? nil : cipherData, status: status == .error ? 11 : 20)
 			return .success((Data(sd.encode(options: CBOROptions())), Data(clearBytesToSend)))
@@ -72,7 +73,7 @@ public class MdocHelpers {
 	///   - handOver: handOver structure
 	/// - Returns: A ``DeviceRequest`` object
 
-	public static func decodeRequestAndInformUser(deviceEngagement: DeviceEngagement?, docs: [String: IssuerSigned], docMetadata: [String: Data], iaca: [SecCertificate], requestData: Data, privateKeyObjects: [String: CoseKeyPrivate], dauthMethod: DeviceAuthMethod, unlockData: [String: Data], readerKeyRawData: [UInt8]?, handOver: CBOR, w3cDocs: [String: String]? = nil) async -> Result<(sessionEncryption: SessionEncryption, deviceRequest: DeviceRequest, userRequestInfo: UserRequestInfo, isValidRequest: Bool), Error> {
+	public static func decodeRequestAndInformUser(deviceEngagement: DeviceEngagement?, docs: [String: IssuerSigned], docMetadata: [String: Data], iaca: [SecCertificate], requestData: Data, privateKeyObjects: [String: CoseKeyPrivate], dauthMethod: DeviceAuthMethod, unlockData: [String: Data], readerKeyRawData: [UInt8]?, handOver: CBOR, w3cDocs: [String: String]? = nil, sdJwtDocs: [String: String]? = nil) async -> Result<(sessionEncryption: SessionEncryption, deviceRequest: DeviceRequest, userRequestInfo: UserRequestInfo, isValidRequest: Bool), Error> {
 		do {
 			guard let seCbor = try CBOR.decode([UInt8](requestData)) else { logger.error("Request Data is not Cbor"); return .failure(Self.makeError(code: .requestDecodeError)) }
 			var se = try SessionEstablishment(cbor: seCbor)
@@ -90,6 +91,9 @@ public class MdocHelpers {
 			var userRequestInfo = UserRequestInfo(docDataFormats: docs.mapValues { _ in .cbor }, itemsRequested: validRequestItems, deviceRequestBytes: Data(requestData))
 			if let w3cDocs {
 				userRequestInfo = UserRequestInfo(docDataFormats: w3cDocs.mapValues { _ in .w3cJwt }, itemsRequested: validRequestItems, deviceRequestBytes: Data(requestData))
+				bInvalidReq = false
+			} else if let sdJwtDocs {
+				userRequestInfo = UserRequestInfo(docDataFormats: sdJwtDocs.mapValues { _ in .sdjwt }, itemsRequested: validRequestItems, deviceRequestBytes: Data(requestData))
 				bInvalidReq = false
 			}
 			
@@ -125,7 +129,7 @@ public class MdocHelpers {
 	///   - dauthMethod: Mdoc Authentication method
 	/// - Returns: (Device response object, valid requested items, error request items) tuple
 	public static func getDeviceResponseToSend(deviceRequest: DeviceRequest?, issuerSigned: [String: IssuerSigned], docMetadata: [String: Data], selectedItems: RequestItems? = nil, sessionEncryption: SessionEncryption? = nil, eReaderKey: CoseKey? = nil, privateKeyObjects: [String: CoseKeyPrivate], sessionTranscript: SessionTranscript? = nil, dauthMethod: DeviceAuthMethod, unlockData: [String: Data]) async throws -> (deviceResponse: DeviceResponse, validRequestItems: RequestItems, errorRequestItems: RequestItems, responseMetadata: [Data?])? {
-		var docFiltered = [Document](); var docErrors = [[DocType: UInt64]]()
+		var docFiltered = [TransferDocument](); var docErrors = [[DocType: UInt64]]()
 		var validReqItemsDocDict = RequestItems(); var errorReqItemsDocDict = RequestItems(); var resMetadata = [Data?]()
 		guard deviceRequest != nil || selectedItems != nil else { fatalError("Invalid call") }
 		let haveSelectedItems = selectedItems != nil
@@ -200,7 +204,7 @@ public class MdocHelpers {
 				}
 				guard let devSignedToAdd else { logger.error("Cannot create device signed"); continue }
 				let docToAdd = Document(docType: doc.issuerAuth.mso.docType, issuerSigned: issToAdd, deviceSigned: devSignedToAdd, errors: errors)
-				docFiltered.append(docToAdd)
+				docFiltered.append(.cbor(docToAdd))
 				validReqItemsDocDict[doc.issuerAuth.mso.docType] = validReqItemsNsDict
 			} else {
 				docErrors.append([doc.issuerAuth.mso.docType: UInt64(0)])
@@ -213,8 +217,8 @@ public class MdocHelpers {
 		return (deviceResponseToSend, validReqItemsDocDict, errorReqItemsDocDict, resMetadata)
 	}
 	
-	public static func getW3CResponseToSend(deviceRequest: DeviceRequest?, w3cDocs: [String: String], docMetadata: [String: Data], selectedItems: RequestItems? = nil, sessionEncryption: SessionEncryption? = nil, eReaderKey: CoseKey? = nil, privateKeyObjects: [String: CoseKeyPrivate], sessionTranscript: SessionTranscript? = nil, dauthMethod: DeviceAuthMethod, unlockData: [String: Data], docType: String) async throws -> [W3CDocument]? {
-			var docFiltered = [W3CDocument]()
+	public static func getW3CResponseToSend(deviceRequest: DeviceRequest?, w3cDocs: [String: String], docMetadata: [String: Data], selectedItems: RequestItems? = nil, sessionEncryption: SessionEncryption? = nil, eReaderKey: CoseKey? = nil, privateKeyObjects: [String: CoseKeyPrivate], sessionTranscript: SessionTranscript? = nil, dauthMethod: DeviceAuthMethod, unlockData: [String: Data], docType: String) async throws -> [TransferDocument]? {
+			var docFiltered = [TransferDocument]()
 			let haveSelectedItems = selectedItems != nil
 			let reqDocIdsOrDocTypes = if haveSelectedItems { Array(selectedItems!.keys) } else { deviceRequest!.docRequests.map(\.itemsRequest.docType) }
 			for reqDocIdOrDocType in reqDocIdsOrDocTypes {
@@ -235,12 +239,38 @@ public class MdocHelpers {
 					}
 					devSignedToAdd = devAuth
 				}
-				let docToAdd = W3CDocument(docType: docType, jwt: w3cDocs[reqDocIdOrDocType]!, deviceAuth: devSignedToAdd!)
-				docFiltered.append(docToAdd)
+				let docToAdd = W3CDocument(docType: docType, jwt: jwt, deviceAuth: devSignedToAdd!)
+				docFiltered.append(.w3cJwt(docToAdd))
 			}
 
 			return docFiltered
 		}
+
+	public static func getSdJwtResponseToSend(deviceRequest: DeviceRequest?, sdJwtDocs: [String: String], docMetadata: [String: Data], selectedItems: RequestItems? = nil, sessionEncryption: SessionEncryption? = nil, eReaderKey: CoseKey? = nil, privateKeyObjects: [String: CoseKeyPrivate], sessionTranscript: SessionTranscript? = nil, dauthMethod: DeviceAuthMethod, unlockData: [String: Data], docType: String) async throws -> [TransferDocument]? {
+		var docFiltered = [TransferDocument]()
+		let haveSelectedItems = selectedItems != nil
+		let reqDocIdsOrDocTypes = if haveSelectedItems { Array(selectedItems!.keys) } else { deviceRequest!.docRequests.map(\.itemsRequest.docType) }
+		for reqDocIdOrDocType in reqDocIdsOrDocTypes {
+			guard let sdJwt = sdJwtDocs[reqDocIdOrDocType] else {
+				print("No SD-JWT, not the correct format for this ID.")
+				return nil
+			}
+			let devicePrivateKey = privateKeyObjects[reqDocIdOrDocType]
+			var devSignedToAdd: DeviceAuth? = nil
+			let sessionTranscript = sessionEncryption?.sessionTranscript ?? sessionTranscript
+			if let eReaderKey, let sessionTranscript, let devicePrivateKey {
+				let authKeys = CoseKeyExchange(publicKey: eReaderKey, privateKey: devicePrivateKey)
+				let mdocAuth = MdocAuthentication(sessionTranscript: sessionTranscript, authKeys: authKeys)
+				guard let devAuth = try await mdocAuth.getDeviceAuthForTransfer(docType: docType, deviceNameSpacesRawData: [0xA0], dauthMethod: dauthMethod, unlockData: unlockData[reqDocIdOrDocType]) else {
+					logger.error("Cannot create device auth"); return nil
+				}
+				devSignedToAdd = devAuth
+			}
+			let docToAdd = SdJwtDocument(docType: docType, sdJwt: sdJwt, deviceAuth: devSignedToAdd!)
+			docFiltered.append(.sdJwt(docToAdd))
+		}
+		return docFiltered
+	}
 
 	/// Returns the number of blocks that dataLength bytes of data can be split into, given a maximum block size of maxBlockSize bytes.
 	/// - Parameters:
