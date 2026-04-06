@@ -16,6 +16,7 @@ limitations under the License.
 
 //  Helpers.swift
 import Foundation
+import CryptoKit
 import CoreBluetooth
 import Combine
 import MdocDataModel18013
@@ -73,7 +74,7 @@ public class MdocHelpers {
 	///   - handOver: handOver structure
 	/// - Returns: A ``DeviceRequest`` object
 
-	public static func decodeRequestAndInformUser(deviceEngagement: DeviceEngagement?, docs: [String: IssuerSigned], docMetadata: [String: Data], iaca: [SecCertificate], requestData: Data, privateKeyObjects: [String: CoseKeyPrivate], dauthMethod: DeviceAuthMethod, unlockData: [String: Data], readerKeyRawData: [UInt8]?, handOver: CBOR, w3cDocs: [String: String]? = nil, sdJwtDocs: [String: String]? = nil) async -> Result<(sessionEncryption: SessionEncryption, deviceRequest: DeviceRequest, userRequestInfo: UserRequestInfo, isValidRequest: Bool), Error> {
+	public static func decodeRequestAndInformUser(deviceEngagement: DeviceEngagement?, docs: [String: IssuerSigned], docMetadata: [String: Data], iaca: [SecCertificate], requestData: Data, privateKeyObjects: [String: CoseKeyPrivate], dauthMethod: DeviceAuthMethod, unlockData: [String: Data], readerKeyRawData: [UInt8]?, handOver: CBOR, w3cDocs: [String: String]? = nil, sdJwtDocs: [String: String]? = nil, ldpVcDocs: [String: String]? = nil) async -> Result<(sessionEncryption: SessionEncryption, deviceRequest: DeviceRequest, userRequestInfo: UserRequestInfo, isValidRequest: Bool), Error> {
 		do {
 			guard let seCbor = try CBOR.decode([UInt8](requestData)) else { logger.error("Request Data is not Cbor"); return .failure(Self.makeError(code: .requestDecodeError)) }
 			var se = try SessionEstablishment(cbor: seCbor)
@@ -87,15 +88,27 @@ public class MdocHelpers {
 			let requestData = try await sessionEncryption.decrypt(requestCipherData)
 			let deviceRequest = try DeviceRequest(data: requestData)
 			guard let (drTest, validRequestItems, _, _) = try await Self.getDeviceResponseToSend(deviceRequest: deviceRequest, issuerSigned: docs, docMetadata: docMetadata, selectedItems: nil, sessionEncryption: sessionEncryption, eReaderKey: sessionEncryption.sessionKeys.publicKey, privateKeyObjects: privateKeyObjects, dauthMethod: dauthMethod, unlockData: unlockData) else { logger.error("Valid request items nil"); return .failure(Self.makeError(code: .requestDecodeError)) }
-			var bInvalidReq = (drTest.documents == nil)
-			var userRequestInfo = UserRequestInfo(docDataFormats: docs.mapValues { _ in .cbor }, itemsRequested: validRequestItems, deviceRequestBytes: Data(requestData))
-			if let w3cDocs {
-				userRequestInfo = UserRequestInfo(docDataFormats: w3cDocs.mapValues { _ in .w3cJwt }, itemsRequested: validRequestItems, deviceRequestBytes: Data(requestData))
-				bInvalidReq = false
-			} else if let sdJwtDocs {
-				userRequestInfo = UserRequestInfo(docDataFormats: sdJwtDocs.mapValues { _ in .sdjwt }, itemsRequested: validRequestItems, deviceRequestBytes: Data(requestData))
-				bInvalidReq = false
+			let requestedFormat = deviceRequest.docRequests.first?.itemsRequest.requestInfo?["format"]
+			var bInvalidReq: Bool
+			var docDataFormats: [String: DocDataFormat]
+			switch requestedFormat {
+			case "mdoc", "mso_mdoc":
+				docDataFormats = docs.mapValues { _ in .cbor }
+				bInvalidReq = (drTest.documents == nil)
+			case "vc+sd-jwt", "dc+sd-jwt", "sd-jwt":
+				docDataFormats = (sdJwtDocs ?? [:]).mapValues { _ in .sdjwt }
+				bInvalidReq = validRequestItems.isEmpty
+			case "ldp_vc":
+				docDataFormats = (ldpVcDocs ?? [:]).mapValues { _ in .ldpVc }
+				bInvalidReq = validRequestItems.isEmpty
+			case "jwt_vc_json", "jwt_vc", "vc+jwt", "w3cjwt":
+				docDataFormats = (w3cDocs ?? [:]).mapValues { _ in .w3cJwt }
+				bInvalidReq = validRequestItems.isEmpty
+			default:
+				docDataFormats = docs.mapValues { _ in .cbor }
+				bInvalidReq = (drTest.documents == nil)
 			}
+			var userRequestInfo = UserRequestInfo(docDataFormats: docDataFormats, itemsRequested: validRequestItems, deviceRequestBytes: Data(requestData))
 			
 			if let docR = deviceRequest.docRequests.first {
 				let mdocAuth = MdocReaderAuthentication(transcript: sessionEncryption.sessionTranscript)
@@ -140,16 +153,18 @@ public class MdocHelpers {
 			var docReq: DocRequest? // if selected items is null
 			if haveSelectedItems == false {
 				docReq = deviceRequest?.docRequests.findDoc(name: reqDocIdOrDocType)
-				guard let pair = issuerSigned.first(where: { $1.issuerAuth.mso.docType == reqDocIdOrDocType}) else {
-					if let format = docReq?.itemsRequest.requestInfo?["format"], format == "mdoc" {
+				if let format = docReq?.itemsRequest.requestInfo?["format"], format == "mdoc" {
+					guard let pair = issuerSigned.first(where: { $1.issuerAuth.mso.docType == reqDocIdOrDocType}) else {
 						docErrors.append([reqDocIdOrDocType: UInt64(0)])
 						errorReqItemsDocDict[reqDocIdOrDocType] = [:]
-					} else {
-						validReqItemsDocDict[reqDocIdOrDocType] = ["all": []];
+						continue
 					}
+					
+					docId = pair.key
+				} else {
+					validReqItemsDocDict[reqDocIdOrDocType] = ["all": []];
 					continue
 				}
-				docId = pair.key
 			} else {
 				guard issuerSigned[reqDocIdOrDocType] != nil else { continue }
 			}
@@ -270,6 +285,54 @@ public class MdocHelpers {
 			docFiltered.append(.sdJwt(docToAdd))
 		}
 		return docFiltered
+	}
+
+
+	public static func getLdpVcResponseToSend(deviceRequest: DeviceRequest?, ldpVcDocs: [String: String], docMetadata: [String: Data], selectedItems: RequestItems? = nil, sessionEncryption: SessionEncryption? = nil, eReaderKey: CoseKey? = nil, privateKeyObjects: [String: CoseKeyPrivate], sessionTranscript: SessionTranscript? = nil, dauthMethod: DeviceAuthMethod, unlockData: [String: Data], docType: String) async throws -> [TransferDocument]? {
+		var docFiltered = [TransferDocument]()
+		let haveSelectedItems = selectedItems != nil
+		let reqDocIdsOrDocTypes = if haveSelectedItems { Array(selectedItems!.keys) } else { deviceRequest!.docRequests.map(\.itemsRequest.docType) }
+		for reqDocIdOrDocType in reqDocIdsOrDocTypes {
+			guard let ldpVc = ldpVcDocs[reqDocIdOrDocType] else {
+				print("No LDP-VC, not the correct format for this ID.")
+				return nil
+			}
+			let devicePrivateKey = privateKeyObjects[reqDocIdOrDocType]
+			var devSignedToAdd: DeviceAuth? = nil
+			let sessionTranscript = sessionEncryption?.sessionTranscript ?? sessionTranscript
+			if let eReaderKey, let sessionTranscript, let devicePrivateKey {
+				let authKeys = CoseKeyExchange(publicKey: eReaderKey, privateKey: devicePrivateKey)
+				let mdocAuth = MdocAuthentication(sessionTranscript: sessionTranscript, authKeys: authKeys)
+				guard let devAuth = try await mdocAuth.getDeviceAuthForTransfer(docType: docType, deviceNameSpacesRawData: [0xA0], dauthMethod: dauthMethod, unlockData: unlockData[reqDocIdOrDocType]) else {
+					logger.error("Cannot create device auth"); return nil
+				}
+				devSignedToAdd = devAuth
+			}
+			let docToAdd = LdpVcDocument(docType: docType, ldpVc: ldpVc, deviceAuth: devSignedToAdd)
+			docFiltered.append(.ldpVc(docToAdd))
+		}
+		return docFiltered
+	}
+
+	public static func getLdpVcVPResponseToSend(deviceRequest: DeviceRequest?, ldpVcDocs: [String: String], selectedItems: RequestItems? = nil, sessionEncryption: SessionEncryption? = nil, docType: String, vpGenerator: (String, String, String) async throws -> String) async throws -> [TransferDocument]? {
+		// Derive nonce from session transcript bytes (provides session binding equivalent to deviceAuth)
+		let transcriptBytes = sessionEncryption?.sessionTranscriptBytes ?? []
+		let transcriptHash = SHA256.hash(data: Data(transcriptBytes))
+		var nonce = transcriptHash.map { String(format: "%02x", $0) }.joined()
+		if nonce.isEmpty { nonce = UUID().uuidString }
+		let haveSelectedItems = selectedItems != nil
+		let reqDocIdsOrDocTypes = if haveSelectedItems { Array(selectedItems!.keys) } else { deviceRequest!.docRequests.map(\.itemsRequest.docType) }
+		var docFiltered = [TransferDocument]()
+		for reqDocIdOrDocType in reqDocIdsOrDocTypes {
+			guard let credentialJson = ldpVcDocs[reqDocIdOrDocType] else {
+				print("No LDP-VC, not the correct format for this ID.")
+				continue
+			}
+			let vpJson = try await vpGenerator(reqDocIdOrDocType, credentialJson, nonce)
+			let docToAdd = LdpVcDocument(docType: docType, ldpVc: vpJson)
+			docFiltered.append(.ldpVc(docToAdd))
+		}
+		return docFiltered.isEmpty ? nil : docFiltered
 	}
 
 	/// Returns the number of blocks that dataLength bytes of data can be split into, given a maximum block size of maxBlockSize bytes.

@@ -38,6 +38,10 @@ public class MdocGattServer: @unchecked Sendable, ObservableObject {
 	public var docs: [String: IssuerSigned]!
 	public var w3cDocs: [String: String]!
 	public var sdJwtDocs: [String: String]!
+	public var ldpVcDocs: [String: String]!
+	/// Optional closure that generates a signed LDP-VC VP for BLE transfer.
+	/// Injected by wallet-kit to avoid a circular dependency. Receives (docId, credentialJson, nonce) → VP JSON string.
+	public var ldpVcVPGenerator: (@Sendable (String, String, String) async throws -> String)?
 	public var docMetadata: [String: Data?]!
 	public var iaca: [SecCertificate]!
 	public var privateKeyObjects: [String: CoseKeyPrivate]!
@@ -74,6 +78,7 @@ public class MdocGattServer: @unchecked Sendable, ObservableObject {
 		self.docs = try objs.documentObjects.filter { k,v in objs.dataFormats[k] == .cbor } .mapValues { try? IssuerSigned(data: $0.bytes) }.compactMapValues { $0 }
 		self.w3cDocs = objs.documentObjects.filter { k,v in objs.dataFormats[k] == .w3cJwt }.compactMapValues { String(data: $0, encoding: .utf8) }
 		self.sdJwtDocs = objs.documentObjects.filter { k,v in objs.dataFormats[k] == .sdjwt }.compactMapValues { String(data: $0, encoding: .utf8) }
+		self.ldpVcDocs = objs.documentObjects.filter { k,v in objs.dataFormats[k] == .ldpVc }.compactMapValues { String(data: $0, encoding: .utf8) }
 		docMetadata = parameters.docMetadata
 		self.privateKeyObjects = objs.privateKeyObjects
 		self.iaca = objs.iaca
@@ -286,7 +291,7 @@ public class MdocGattServer: @unchecked Sendable, ObservableObject {
 		delegate?.didChangeStatus(newValue)
 		if newValue == .requestReceived {
 			peripheralManager.stopAdvertising()
-			let decodedRes = await MdocHelpers.decodeRequestAndInformUser(deviceEngagement: deviceEngagement, docs: docs, docMetadata: docMetadata.compactMapValues { $0 }, iaca: iaca, requestData: readBuffer, privateKeyObjects: privateKeyObjects, dauthMethod: dauthMethod, unlockData: unlockData, readerKeyRawData: nil, handOver: BleTransferMode.QRHandover, w3cDocs: w3cDocs, sdJwtDocs: sdJwtDocs)
+			let decodedRes = await MdocHelpers.decodeRequestAndInformUser(deviceEngagement: deviceEngagement, docs: docs, docMetadata: docMetadata.compactMapValues { $0 }, iaca: iaca, requestData: readBuffer, privateKeyObjects: privateKeyObjects, dauthMethod: dauthMethod, unlockData: unlockData, readerKeyRawData: nil, handOver: BleTransferMode.QRHandover, w3cDocs: w3cDocs, sdJwtDocs: sdJwtDocs, ldpVcDocs: ldpVcDocs)
 			switch decodedRes {
 			case .success(let decoded):
 				self.deviceRequest = decoded.deviceRequest
@@ -344,6 +349,12 @@ public class MdocGattServer: @unchecked Sendable, ObservableObject {
 				}
 				if let sdJwtResults = try await MdocHelpers.getSdJwtResponseToSend(deviceRequest: deviceRequest!, sdJwtDocs: sdJwtDocs, docMetadata: docMetadata.compactMapValues { $0 }, selectedItems: items, sessionEncryption: sessionEncryption, eReaderKey: sessionEncryption!.sessionKeys.publicKey, privateKeyObjects: privateKeyObjects, dauthMethod: dauthMethod, unlockData: unlockData, docType: docTypeReq) {
 					drToSend.documents = (drToSend.documents ?? []) + sdJwtResults
+				}
+				if let generator = ldpVcVPGenerator,
+				   let ldpVcResults = try await MdocHelpers.getLdpVcVPResponseToSend(deviceRequest: deviceRequest!, ldpVcDocs: ldpVcDocs, selectedItems: items, sessionEncryption: sessionEncryption, docType: docTypeReq, vpGenerator: generator) {
+					drToSend.documents = (drToSend.documents ?? []) + ldpVcResults
+				} else if let ldpVcResults = try await MdocHelpers.getLdpVcResponseToSend(deviceRequest: deviceRequest!, ldpVcDocs: ldpVcDocs, docMetadata: docMetadata.compactMapValues { $0 }, selectedItems: items, sessionEncryption: sessionEncryption, eReaderKey: sessionEncryption!.sessionKeys.publicKey, privateKeyObjects: privateKeyObjects, dauthMethod: dauthMethod, unlockData: unlockData, docType: docTypeReq) {
+					drToSend.documents = (drToSend.documents ?? []) + ldpVcResults
 				}
 				
 //				guard let dts = drToSend.documents, !dts.isEmpty else {
